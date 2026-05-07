@@ -1,0 +1,102 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=Inter:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --font-display: 'Space Grotesk', Inter, ui-sans-serif, system-ui;
+    --font-body: Inter, Arial, ui-sans-serif, system-ui;
+  }
+
+  html {
+    font-family: var(--font-body);
+    color: #212121;
+    background-color: #ffffff;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+}
+
+@layer components {
+  /* Primary pill CTA button */
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 
+           bg-near-black text-white 
+           px-6 py-3 rounded-pill text-btn font-medium
+           transition-opacity hover:opacity-80
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-blue;
+  }
+
+  /* Secondary text-link action */
+  .btn-secondary {
+    @apply inline-flex items-center gap-1.5 text-ink text-body underline
+           hover:opacity-70 transition-opacity
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-blue;
+  }
+
+  /* Pill outline control */
+  .btn-pill-outline {
+    @apply inline-flex items-center gap-1.5 border border-near-black 
+           rounded-xl px-4 py-1.5 text-btn text-ink bg-transparent
+           hover:bg-near-black hover:text-white transition-colors
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-blue;
+  }
+
+  /* Blog/taxonomy chip */
+  .chip-coral {
+    @apply inline-flex items-center px-3 py-1 rounded-sm
+           border border-coral text-coral text-caption
+           bg-transparent;
+  }
+
+  .chip-coral-active {
+    @apply inline-flex items-center px-3 py-1 rounded-sm
+           bg-coral text-near-black text-caption;
+  }
+
+  /* Severity badge */
+  .badge-critical {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-xs
+           bg-red-50 text-error-red text-mono-label uppercase tracking-wider text-xs font-medium;
+  }
+
+  .badge-warning {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-xs
+           bg-yellow-50 text-yellow-700 text-mono-label uppercase tracking-wider text-xs font-medium;
+  }
+
+  .badge-info {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-xs
+           bg-blue-50 text-action-blue text-mono-label uppercase tracking-wider text-xs font-medium;
+  }
+
+  /* Card */
+  .card {
+    @apply bg-canvas-white rounded-sm border border-card-border p-6;
+  }
+
+  .card-stone {
+    @apply bg-soft-stone rounded-sm p-6;
+  }
+
+  /* Dark feature band */
+  .dark-band {
+    @apply bg-enterprise-green text-white;
+  }
+
+  /* Section container */
+  .container-main {
+    @apply max-w-7xl mx-auto px-6 lg:px-8;
+  }
+}
