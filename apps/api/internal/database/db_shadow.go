@@ -25,7 +25,7 @@ func ConnectShadow(databaseURL string) (*DBShadow, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	return &DBShadow{Pool: pool}, nil
+	return &DBShadow{Pool: pool},  nil
 }
 
 func (db *DBShadow) Close() {
