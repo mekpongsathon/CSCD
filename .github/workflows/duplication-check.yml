@@ -110,6 +110,46 @@ jobs:
             return lines.length <= n ? code : lines.slice(0, n).join('\n') + '\n...';
           }
 
+          function normalizeLineForMatch(line) {
+            return line
+              .trim()
+              .replace(/\s+/g, ' ')
+              .replace(/[{}();,]/g, '')
+              .toLowerCase();
+          }
+
+          function collectMatchingLines(codeA, codeB, limit = 6) {
+            const aLines = codeA.split('\n');
+            const bLines = codeB.split('\n');
+
+            const bMap = new Map();
+            for (let i = 0; i < bLines.length; i++) {
+              const raw = bLines[i];
+              const norm = normalizeLineForMatch(raw);
+              if (!norm || norm.length < 12) continue;
+              if (!bMap.has(norm)) bMap.set(norm, i + 1);
+            }
+
+            const used = new Set();
+            const matches = [];
+            for (let i = 0; i < aLines.length; i++) {
+              const raw = aLines[i];
+              const norm = normalizeLineForMatch(raw);
+              if (!norm || norm.length < 12 || used.has(norm)) continue;
+              if (bMap.has(norm)) {
+                matches.push({
+                  text: raw.trim(),
+                  new_line: i + 1,
+                  existing_line: bMap.get(norm),
+                });
+                used.add(norm);
+                if (matches.length >= limit) break;
+              }
+            }
+
+            return matches;
+          }
+
           function walkDir(dir) {
             const files = [];
             (function walk(cur) {
@@ -162,6 +202,7 @@ jobs:
 
               const score = similarity(newFP, fingerprint(normalize(ec)));
               if (score >= THRESHOLD_INFO) {
+                const matchingLines = collectMatchingLines(newContent, ec, 8);
                 findings.push({
                   new_file_path: newFile,
                   existing_file_path: rel,
@@ -169,6 +210,7 @@ jobs:
                   severity: severity(score),
                   category,
                   language: langOf(ext),
+                  matching_lines: matchingLines,
                   code_snippet: head(newContent, 20),
                   existing_snippet: head(ec, 20)
                 });
@@ -197,15 +239,44 @@ jobs:
             return `<span style="background:${colors[sev]};color:#fff;padding:2px 10px;border-radius:99px;font-size:11px;font-weight:700;letter-spacing:.5px">${sev.toUpperCase()}</span>`;
           }
 
+          function highlightedSnippet(snippet, matchingLines) {
+            const keys = new Set((matchingLines || []).map(m => normalizeLineForMatch(m.text)));
+            return snippet.split('\n').map(line => {
+              const safe = esc(line);
+              const norm = normalizeLineForMatch(line);
+              if (keys.has(norm)) {
+                return `<mark style="background:#fff3b0;padding:0 2px;border-radius:3px">${safe}</mark>`;
+              }
+              return safe;
+            }).join('<br/>');
+          }
+
           const rows = findings.map(f => `
             <tr>
               <td style="white-space:nowrap">${badge(f.severity)}</td>
               <td style="font-family:monospace;font-size:12px">${esc(f.new_file_path)}</td>
               <td style="font-family:monospace;font-size:12px">${esc(f.existing_file_path)}</td>
               <td style="font-weight:700;color:${f.severity==='critical'?'#c53030':f.severity==='warning'?'#b7791f':'#2b6cb0'};white-space:nowrap">${f.similarity_score}%</td>
+              <td>${(f.matching_lines || []).length}</td>
               <td>${f.category}</td>
               <td>${f.language}</td>
             </tr>`).join('');
+
+          const detailBlocks = findings.map((f, i) => `
+            <details style="margin-top:12px;background:#fff;border-radius:10px;padding:10px 12px;box-shadow:0 1px 3px rgba(0,0,0,.08)">
+              <summary style="cursor:pointer;font-weight:600">Match #${i + 1}: ${esc(f.new_file_path)} ↔ ${esc(f.existing_file_path)} (${f.similarity_score}%)</summary>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px">
+                <div>
+                  <div style="font-size:12px;color:#555;margin-bottom:6px">New file snippet</div>
+                  <pre style="background:#f8f8f9;padding:10px;border-radius:8px;overflow:auto;font-size:12px;line-height:1.4;white-space:pre-wrap">${highlightedSnippet(f.code_snippet, f.matching_lines)}</pre>
+                </div>
+                <div>
+                  <div style="font-size:12px;color:#555;margin-bottom:6px">Existing file snippet</div>
+                  <pre style="background:#f8f8f9;padding:10px;border-radius:8px;overflow:auto;font-size:12px;line-height:1.4;white-space:pre-wrap">${highlightedSnippet(f.existing_snippet, f.matching_lines)}</pre>
+                </div>
+              </div>
+              <div style="margin-top:8px;font-size:12px;color:#666">Matched lines: ${(f.matching_lines || []).map(m => `new:${m.new_line} ↔ old:${m.existing_line}`).join(', ') || 'N/A'}</div>
+            </details>`).join('');
 
           const runUrl = `${SERVER_URL}/${REPO_FULL}/actions/runs/${RUN_ID}`;
 
@@ -247,16 +318,17 @@ a{color:#1863dc}
     <div class="card c3"><div class="n">${info.length}</div><div class="l">Info &#x2265;60%</div></div>
   </div>
 
-  ${findings.length === 0
-    ? '<div class="clean">&#x2705; No significant code duplication detected!</div>'
-    : `<table>
-        <thead><tr><th>Severity</th><th>New File (PR)</th><th>Similar To</th><th>Score</th><th>Category</th><th>Language</th></tr></thead>
-        <tbody>${rows}</tbody>
-       </table>`
-  }
-</div>
-</body>
-</html>`;
+            ${findings.length === 0
+              ? '<div class="clean">&#x2705; No significant code duplication detected!</div>'
+              : `<table>
+                  <thead><tr><th>Severity</th><th>New File (PR)</th><th>Similar To</th><th>Score</th><th>Matches</th><th>Category</th><th>Language</th></tr></thead>
+                  <tbody>${rows}</tbody>
+                 </table>
+                 ${detailBlocks}`
+            }
+          </div>
+          </body>
+          </html>`;
 
           fs.writeFileSync('/tmp/report.html', html);
           console.log(`Done: ${findings.length} findings | critical=${critical.length} warning=${warning.length} info=${info.length}`);
@@ -339,10 +411,10 @@ a{color:#1863dc}
 
               const top = findings.slice(0, 5);
               body += `<details>\n<summary>Top ${top.length} Finding(s)</summary>\n\n`;
-              body += `| | New File | Similar To | Score |\n|--|----------|-----------|-------|\n`;
+              body += `| | New File | Similar To | Score | Matches |\n|--|----------|-----------|-------|---------|\n`;
               for (const f of top) {
                 const ico = f.severity === 'critical' ? '🚨' : f.severity === 'warning' ? '⚠️' : 'ℹ️';
-                body += `| ${ico} | \`${f.new_file_path}\` | \`${f.existing_file_path}\` | **${f.similarity_score}%** |\n`;
+                body += `| ${ico} | \`${f.new_file_path}\` | \`${f.existing_file_path}\` | **${f.similarity_score}%** | ${(f.matching_lines || []).length} |\n`;
               }
               body += `\n</details>\n\n`;
               body += `👉 **[View Full Report & HTML](${runUrl})** ← Actions tab → Job Summary / Artifacts\n`;
