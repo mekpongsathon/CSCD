@@ -6,7 +6,7 @@ import (
 	"github.com/google/uuid"
 )
 
-type RepositoryEntity struct {
+type RepositoryV2 struct {
 	ID        uuid.UUID `json:"id"`
 	Name      string    `json:"name"`
 	GithubURL string    `json:"github_url"`
@@ -16,7 +16,7 @@ type RepositoryEntity struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-type AnalysisJobEntity struct {
+type AnalysisJobV2 struct {
 	ID                uuid.UUID  `json:"id"`
 	RepositoryID      uuid.UUID  `json:"repository_id"`
 	BranchName        string     `json:"branch_name"`
@@ -28,7 +28,7 @@ type AnalysisJobEntity struct {
 	CreatedAt         time.Time  `json:"created_at"`
 }
 
-type AnalysisResultEntity struct {
+type AnalysisResultV2 struct {
 	ID               uuid.UUID `json:"id"`
 	AnalysisJobID    uuid.UUID `json:"analysis_job_id"`
 	Category         string    `json:"category"`

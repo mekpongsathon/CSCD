@@ -5,10 +5,10 @@ import {
   Repository,
 } from "@/types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 
-async function fetchData<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}/api/v1${path}`, {
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(`${BASE_URL}/api/v1${path}`, {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
@@ -23,24 +23,23 @@ async function fetchData<T>(path: string, options?: RequestInit): Promise<T> {
 
 export const apiClient = {
   repositories: {
-    list: () => fetchData<Repository[]>("/repositories"),
-    get: (id: string) => fetchData<Repository>(`/repositories/${id}`),
+    list: () => request<Repository[]>("/repositories"),
+    get: (id: string) => request<Repository>(`/repositories/${id}`),
     create: (data: CreateRepositoryRequest) =>
-      fetchData<Repository>("/repositories", {
+      request<Repository>("/repositories", {
         method: "POST",
         body: JSON.stringify(data),
       }),
     delete: (id: string) =>
-      fetchData<void>(`/repositories/${id}`, { method: "DELETE" }),
+      request<void>(`/repositories/${id}`, { method: "DELETE" }),
   },
 
   jobs: {
-    list: (repositoryId?: string) =>
-      fetchData<AnalysisJob[]>(
-        repositoryId ? `/jobs?repository_id=${repositoryId}` : "/jobs"
-      ),
-    get: (id: string) => fetchData<AnalysisJob>(`/jobs/${id}`),
-    results: (id: string) =>
-      fetchData<AnalysisResult[]>(`/jobs/${id}/results`),
+    list: (repositoryId?: string) => {
+      const qs = repositoryId ? `?repository_id=${repositoryId}` : "";
+      return request<AnalysisJob[]>(`/jobs${qs}`);
+    },
+    get: (id: string) => request<AnalysisJob>(`/jobs/${id}`),
+    results: (id: string) => request<AnalysisResult[]>(`/jobs/${id}/results`),
   },
 };
