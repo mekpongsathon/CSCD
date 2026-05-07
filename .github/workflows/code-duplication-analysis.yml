@@ -1,8 +1,7 @@
 name: Code Duplication Analysis
 
 on:
-  pull_request:
-    types: [opened, synchronize]
+  workflow_dispatch:
 
 jobs:
   analyze:
