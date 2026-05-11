@@ -35,33 +35,10 @@ jobs:
       - name: Write Job Summary
         if: always()
         run: |
-          if [ -f /tmp/findings.json ]; then
-            TOTAL=$(jq '.findings | length' /tmp/findings.json)
-            CRIT=$(jq '[.findings[] | select(.severity=="critical")] | length' /tmp/findings.json)
-            WARN=$(jq '[.findings[] | select(.severity=="warning")] | length' /tmp/findings.json)
-            INFO=$(jq '[.findings[] | select(.severity=="info")] | length' /tmp/findings.json)
-            CHANGED=$(jq '.total_changed' /tmp/findings.json)
-
-            if [ "$TOTAL" = "0" ]; then
-              echo "## No Code Duplication Detected" >> $GITHUB_STEP_SUMMARY
-              echo "**$CHANGED** file(s) analyzed — all clean." >> $GITHUB_STEP_SUMMARY
-            else
-              echo "## Code Duplication Report" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
-              echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-              echo "| Total Findings | $TOTAL |" >> $GITHUB_STEP_SUMMARY
-              echo "| Critical (>=90%) | $CRIT |" >> $GITHUB_STEP_SUMMARY
-              echo "| Warning (>=75%) | $WARN |" >> $GITHUB_STEP_SUMMARY
-              echo "| Info (>=60%) | $INFO |" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "### Findings" >> $GITHUB_STEP_SUMMARY
-              echo "| Severity | New File | Similar To | Score | Matches |" >> $GITHUB_STEP_SUMMARY
-              echo "|----------|----------|-----------|-------|---------|" >> $GITHUB_STEP_SUMMARY
-              jq -r '.findings[] | "| \(.severity) | `\(.new_file_path)` | `\(.existing_file_path)` | **\(.similarity_score)%** | \((.matching_lines // []) | length) |"' /tmp/findings.json >> $GITHUB_STEP_SUMMARY
-            fi
+          if [ -f /tmp/report.html ]; then
+            cat /tmp/report.html >> $GITHUB_STEP_SUMMARY
           else
-            echo "## Analysis failed" >> $GITHUB_STEP_SUMMARY
+            echo "## Analysis failed - no report generated" >> $GITHUB_STEP_SUMMARY
           fi
 
       - name: Upload HTML Report
