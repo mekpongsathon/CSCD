@@ -40,6 +40,11 @@ export const apiSimilarityProbeV2 = {
       return request<AnalysisJob[]>(`/jobs${qs}`);
     },
     get: (id: string) => request<AnalysisJob>(`/jobs/${id}`),
+    create: (repositoryId: string) =>
+      request<AnalysisJob>("/jobs", {
+        method: "POST",
+        body: JSON.stringify({ repository_id: repositoryId }),
+      }),
     results: (id: string) => request<AnalysisResult[]>(`/jobs/${id}/results`),
   },
 };
