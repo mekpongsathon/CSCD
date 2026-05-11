@@ -1,6 +1,8 @@
-name: Code Duplication Analysis
+name: Code Duplication Check
 
 on:
+  pull_request:
+    types: [opened, synchronize]
   workflow_dispatch:
 
 jobs:
@@ -18,98 +20,450 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-
-      - name: Build Analyzer
-        working-directory: apps/analyzer
-        run: go build -o analyzer ./main.go
-
-      - name: Trigger Analysis Job
-        id: create_job
-        run: |
-          RESPONSE=$(curl -s -X POST "${{ secrets.CSCD2_API_URL }}/api/v1/analyze" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "repository_url": "${{ github.event.repository.clone_url }}",
-              "branch_name": "${{ github.head_ref }}",
-              "pull_request_number": ${{ github.event.number }},
-              "base_branch": "${{ github.base_ref }}"
-            }')
-          echo "response=$RESPONSE" >> $GITHUB_OUTPUT
-          echo "job_id=$(echo $RESPONSE | jq -r '.job_id')" >> $GITHUB_OUTPUT
-
-      - name: Run Analyzer
-        id: run_analysis
-        run: |
-          ./apps/analyzer/analyzer \
-            --repo "${{ github.workspace }}" \
-            --base "origin/${{ github.base_ref }}" \
-            --job-id "${{ steps.create_job.outputs.job_id }}" \
-            --output analysis_report.json
-        continue-on-error: true
-
-      - name: Read Report
-        id: report
-        if: always()
-        run: |
-          if [ -f analysis_report.json ]; then
-            FINDINGS=$(cat analysis_report.json | jq '.findings | length')
-            CRITICAL=$(cat analysis_report.json | jq '[.findings[] | select(.severity=="critical")] | length')
-            echo "findings=$FINDINGS" >> $GITHUB_OUTPUT
-            echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
-          else
-            echo "findings=0" >> $GITHUB_OUTPUT
-            echo "critical=0" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Comment on PR
-        if: always()
-        uses: actions/github-script@v7
+      - name: Run Duplication Analyzer
+        id: analyze
         env:
-          FINDINGS: ${{ steps.report.outputs.findings }}
-          CRITICAL: ${{ steps.report.outputs.critical }}
-          JOB_ID: ${{ steps.create_job.outputs.job_id }}
-          DASHBOARD_URL: ${{ secrets.CSCD2_DASHBOARD_URL }}
-        with:
-          script: |
-            const findings = parseInt(process.env.FINDINGS || '0');
-            const critical = parseInt(process.env.CRITICAL || '0');
-            const jobId = process.env.JOB_ID;
-            const dashboardUrl = process.env.DASHBOARD_URL;
+          REPO_PATH: ${{ github.workspace }}
+          BASE_BRANCH: ${{ github.base_ref || github.event.repository.default_branch || 'main' }}
+          PR_NUMBER: ${{ github.event.number || 0 }}
+          RUN_ID: ${{ github.run_id }}
+          REPO_FULL: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          cat > /tmp/analyzer.js << 'JSEOF'
+          const fs = require('fs');
+          const path = require('path');
+          const { execSync } = require('child_process');
 
-            let icon = findings === 0 ? '✅' : critical > 0 ? '🚨' : '⚠️';
-            let title = findings === 0
-              ? 'No code duplication detected'
-              : `${findings} duplicate finding(s) detected`;
+          const REPO_PATH = process.env.REPO_PATH || '.';
+          const BASE_BRANCH = process.env.BASE_BRANCH || 'main';
+          const PR_NUMBER = process.env.PR_NUMBER || '0';
+          const RUN_ID = process.env.RUN_ID || '';
+          const REPO_FULL = process.env.REPO_FULL || '';
+          const SERVER_URL = process.env.SERVER_URL || 'https://github.com';
 
-            let body = `## ${icon} CSCD2 — Code Duplication Analysis\n\n`;
-            body += `**Branch:** \`${context.payload.pull_request.head.ref}\`\n\n`;
+          const THRESHOLD_INFO = 60;
+          const THRESHOLD_WARNING = 75;
+          const THRESHOLD_CRITICAL = 90;
+          const MIN_LINES = 8;
+          const MIN_TOKENS = 20;
+          const K_GRAM = 5;
+          const WINDOW = 4;
 
-            if (findings === 0) {
-              body += `This pull request looks clean — no significant code duplication found.\n`;
-            } else {
-              body += `| Metric | Count |\n|--------|-------|\n`;
-              body += `| Total Findings | ${findings} |\n`;
-              body += `| Critical (≥90%) | ${critical} |\n\n`;
-              if (dashboardUrl && jobId) {
-                body += `[View Full Report](${dashboardUrl}/jobs/${jobId})\n`;
+          const IGNORE = ['dist/', 'build/', 'generated/', 'node_modules/', 'migrations/', '.git/', 'vendor/', '.g.ts'];
+          const FRONTEND = new Set(['.ts', '.tsx', '.js', '.jsx', '.css', '.scss']);
+          const BACKEND = new Set(['.go', '.cs', '.java', '.py']);
+
+          function isIgnored(p) {
+            return IGNORE.some((pat) => p.replace(/\\/g, '/').includes(pat));
+          }
+
+          function tokenize(code) {
+            return code.split(/\s+/).filter((t) => t.length > 0);
+          }
+
+          function normalize(code) {
+            return code
+              .split('\n')
+              .map((l) => l.trim())
+              .filter((l) => l.length > 0 && !l.startsWith('//') && !l.startsWith('#') && !l.startsWith('--'))
+              .join('\n');
+          }
+
+          function hash32(s) {
+            let h = 0x811c9dc5;
+            for (let i = 0; i < s.length; i++) {
+              h ^= s.charCodeAt(i);
+              h = (h * 0x01000193) >>> 0;
+            }
+            return h;
+          }
+
+          function fingerprint(code) {
+            const tokens = tokenize(code);
+            if (tokens.length < K_GRAM) return tokens.map((t) => hash32(t));
+
+            const kgrams = [];
+            for (let i = 0; i <= tokens.length - K_GRAM; i++) {
+              kgrams.push(hash32(tokens.slice(i, i + K_GRAM).join(' ')));
+            }
+
+            const fps = [];
+            let lastMinPos = -1;
+            for (let i = 0; i <= kgrams.length - WINDOW; i++) {
+              const w = kgrams.slice(i, i + WINDOW);
+              let minVal = w[0];
+              let minPos = i;
+              for (let j = 1; j < w.length; j++) {
+                if (w[j] < minVal) {
+                  minVal = w[j];
+                  minPos = i + j;
+                }
+              }
+              if (minPos !== lastMinPos) {
+                fps.push(minVal);
+                lastMinPos = minPos;
+              }
+            }
+            return fps;
+          }
+
+          function similarity(fp1, fp2) {
+            if (!fp1.length || !fp2.length) return 0;
+            const set1 = new Set(fp1);
+            const inter = fp2.filter((h) => set1.has(h)).length;
+            const union = fp1.length + fp2.length - inter;
+            return union === 0 ? 0 : (inter / union) * 100;
+          }
+
+          function severity(score) {
+            if (score >= THRESHOLD_CRITICAL) return 'critical';
+            if (score >= THRESHOLD_WARNING) return 'warning';
+            return 'info';
+          }
+
+          function langOf(ext) {
+            return {
+              '.ts': 'typescript', '.tsx': 'typescript', '.js': 'javascript', '.jsx': 'javascript',
+              '.go': 'go', '.cs': 'csharp', '.py': 'python', '.java': 'java',
+            }[ext] || 'unknown';
+          }
+
+          function head(code, n) {
+            const lines = code.split('\n');
+            return lines.length <= n ? code : lines.slice(0, n).join('\n') + '\n...';
+          }
+
+          function normalizeLineForMatch(line) {
+            return line.trim().replace(/\s+/g, ' ').replace(/[{}();,]/g, '').toLowerCase();
+          }
+
+          function collectMatchingLines(codeA, codeB, limit = 6) {
+            const aLines = codeA.split('\n');
+            const bLines = codeB.split('\n');
+
+            const bMap = new Map();
+            for (let i = 0; i < bLines.length; i++) {
+              const raw = bLines[i];
+              const norm = normalizeLineForMatch(raw);
+              if (!norm || norm.length < 12) continue;
+              if (!bMap.has(norm)) bMap.set(norm, i + 1);
+            }
+
+            const used = new Set();
+            const matches = [];
+            for (let i = 0; i < aLines.length; i++) {
+              const raw = aLines[i];
+              const norm = normalizeLineForMatch(raw);
+              if (!norm || norm.length < 12 || used.has(norm)) continue;
+              if (bMap.has(norm)) {
+                matches.push({
+                  text: raw.trim(),
+                  new_line: i + 1,
+                  existing_line: bMap.get(norm),
+                });
+                used.add(norm);
+                if (matches.length >= limit) break;
               }
             }
 
-            body += `\n---\n*Analyzed by [CSCD2](${dashboardUrl || '#'})*`;
+            return matches;
+          }
 
-            // Find existing comment
+          function walkDir(dir) {
+            const files = [];
+            (function walk(cur) {
+              try {
+                for (const e of fs.readdirSync(cur, { withFileTypes: true })) {
+                  const full = path.join(cur, e.name);
+                  if (e.isDirectory()) {
+                    if (!isIgnored(e.name + '/')) walk(full);
+                  } else {
+                    files.push(full);
+                  }
+                }
+              } catch (_) {}
+            })(dir);
+            return files;
+          }
+
+          function changedFiles() {
+            try {
+              return execSync(
+                `git diff --name-only --diff-filter=AM origin/${BASE_BRANCH}...HEAD`,
+                { cwd: REPO_PATH, encoding: 'utf8' }
+              ).trim().split('\n').filter((f) => f.length > 0);
+            } catch (e) {
+              console.error('git diff failed:', e.message);
+              return [];
+            }
+          }
+
+          function esc(s) {
+            return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          }
+
+          function badge(sev) {
+            const colors = { critical: '#c53030', warning: '#b7791f', info: '#2b6cb0' };
+            return `<span style="background:${colors[sev]};color:#fff;padding:2px 10px;border-radius:99px;font-size:11px;font-weight:700;letter-spacing:.5px">${sev.toUpperCase()}</span>`;
+          }
+
+          function highlightedSnippet(snippet, matchingLines) {
+            const keys = new Set((matchingLines || []).map((m) => normalizeLineForMatch(m.text)));
+            return snippet.split('\n').map((line) => {
+              const safe = esc(line);
+              const norm = normalizeLineForMatch(line);
+              if (keys.has(norm)) {
+                return `<mark style="background:#fff3b0;padding:0 2px;border-radius:3px">${safe}</mark>`;
+              }
+              return safe;
+            }).join('<br/>');
+          }
+
+          const changed = changedFiles();
+          const allFiles = walkDir(REPO_PATH);
+          const findings = [];
+
+          for (const newFile of changed) {
+            if (isIgnored(newFile)) continue;
+            const ext = path.extname(newFile).toLowerCase();
+            if (!FRONTEND.has(ext) && !BACKEND.has(ext)) continue;
+
+            const category = FRONTEND.has(ext) ? 'frontend' : 'backend';
+            let newContent;
+            try {
+              newContent = fs.readFileSync(path.join(REPO_PATH, newFile), 'utf8');
+            } catch (_) {
+              continue;
+            }
+            if (tokenize(newContent).length < MIN_TOKENS) continue;
+            if (newContent.split('\n').length < MIN_LINES) continue;
+
+            const newFP = fingerprint(normalize(newContent));
+
+            for (const existing of allFiles) {
+              const rel = path.relative(REPO_PATH, existing).replace(/\\/g, '/');
+              if (rel === newFile || isIgnored(rel)) continue;
+              if (path.extname(existing).toLowerCase() !== ext) continue;
+
+              let ec;
+              try {
+                ec = fs.readFileSync(existing, 'utf8');
+              } catch (_) {
+                continue;
+              }
+              if (ec.split('\n').length < MIN_LINES) continue;
+
+              const score = similarity(newFP, fingerprint(normalize(ec)));
+              if (score >= THRESHOLD_INFO) {
+                findings.push({
+                  new_file_path: newFile,
+                  existing_file_path: rel,
+                  similarity_score: Math.round(score * 10) / 10,
+                  severity: severity(score),
+                  category,
+                  language: langOf(ext),
+                  matching_lines: collectMatchingLines(newContent, ec, 8),
+                  code_snippet: head(newContent, 20),
+                  existing_snippet: head(ec, 20),
+                });
+              }
+            }
+          }
+
+          findings.sort((a, b) => b.similarity_score - a.similarity_score);
+
+          const critical = findings.filter((f) => f.severity === 'critical');
+          const warning = findings.filter((f) => f.severity === 'warning');
+          const info = findings.filter((f) => f.severity === 'info');
+
+          const reportData = {
+            pr_number: PR_NUMBER,
+            base_branch: BASE_BRANCH,
+            analyzed_at: new Date().toISOString(),
+            total_changed: changed.length,
+            findings,
+          };
+          fs.writeFileSync('/tmp/findings.json', JSON.stringify(reportData, null, 2));
+
+          const runUrl = `${SERVER_URL}/${REPO_FULL}/actions/runs/${RUN_ID}`;
+
+          const rows = findings.map((f) => `
+            <tr>
+              <td style="white-space:nowrap">${badge(f.severity)}</td>
+              <td style="font-family:monospace;font-size:12px">${esc(f.new_file_path)}</td>
+              <td style="font-family:monospace;font-size:12px">${esc(f.existing_file_path)}</td>
+              <td style="font-weight:700;color:${f.severity === 'critical' ? '#c53030' : f.severity === 'warning' ? '#b7791f' : '#2b6cb0'};white-space:nowrap">${f.similarity_score}%</td>
+              <td>${(f.matching_lines || []).length}</td>
+              <td>${f.category}</td>
+              <td>${f.language}</td>
+            </tr>`).join('');
+
+          const detailBlocks = findings.map((f, i) => `
+            <details style="margin-top:12px;background:#fff;border-radius:10px;padding:10px 12px;box-shadow:0 1px 3px rgba(0,0,0,.08)">
+              <summary style="cursor:pointer;font-weight:600">Match #${i + 1}: ${esc(f.new_file_path)} ↔ ${esc(f.existing_file_path)} (${f.similarity_score}%)</summary>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px">
+                <div>
+                  <div style="font-size:12px;color:#555;margin-bottom:6px">New file snippet</div>
+                  <pre style="background:#f8f8f9;padding:10px;border-radius:8px;overflow:auto;font-size:12px;line-height:1.4;white-space:pre-wrap">${highlightedSnippet(f.code_snippet, f.matching_lines)}</pre>
+                </div>
+                <div>
+                  <div style="font-size:12px;color:#555;margin-bottom:6px">Existing file snippet</div>
+                  <pre style="background:#f8f8f9;padding:10px;border-radius:8px;overflow:auto;font-size:12px;line-height:1.4;white-space:pre-wrap">${highlightedSnippet(f.existing_snippet, f.matching_lines)}</pre>
+                </div>
+              </div>
+              <div style="margin-top:8px;font-size:12px;color:#666">Matched lines: ${(f.matching_lines || []).map((m) => `new:${m.new_line} ↔ old:${m.existing_line}`).join(', ') || 'N/A'}</div>
+            </details>`).join('');
+
+          const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CSCD2 — PR #${PR_NUMBER} Duplication Report</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f7f7f8;color:#17171c;padding:32px 24px}
+.wrap{max-width:1100px;margin:0 auto}
+h1{font-size:22px;font-weight:700;margin-bottom:4px}
+.meta{color:#888;font-size:13px;margin-bottom:28px}
+.stats{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:28px}
+.card{background:#fff;border-radius:10px;padding:18px 24px;flex:1;min-width:130px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.card .n{font-size:34px;font-weight:800}
+.card .l{font-size:12px;color:#999;margin-top:4px;text-transform:uppercase;letter-spacing:.5px}
+.c0 .n{color:#17171c} .c1 .n{color:#c53030} .c2 .n{color:#b7791f} .c3 .n{color:#2b6cb0}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+th{background:#17171c;color:#fff;padding:11px 14px;text-align:left;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+td{padding:11px 14px;border-bottom:1px solid #f0f0f0;font-size:13px;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#fafafa}
+.clean{text-align:center;padding:64px;background:#fff;border-radius:10px;color:#276749;font-size:18px;font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+a{color:#1863dc}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>&#128269; CSCD2 — Code Duplication Report</h1>
+  <p class="meta">PR #${PR_NUMBER} &nbsp;&middot;&nbsp; Base: <code>${BASE_BRANCH}</code> &nbsp;&middot;&nbsp; ${new Date().toUTCString()} &nbsp;&middot;&nbsp; <a href="${runUrl}">View Run</a></p>
+
+  <div class="stats">
+    <div class="card c0"><div class="n">${findings.length}</div><div class="l">Total Findings</div></div>
+    <div class="card c1"><div class="n">${critical.length}</div><div class="l">Critical &#x2265;90%</div></div>
+    <div class="card c2"><div class="n">${warning.length}</div><div class="l">Warning &#x2265;75%</div></div>
+    <div class="card c3"><div class="n">${info.length}</div><div class="l">Info &#x2265;60%</div></div>
+  </div>
+
+  ${findings.length === 0
+    ? '<div class="clean">&#x2705; No significant code duplication detected!</div>'
+    : `<table>
+        <thead><tr><th>Severity</th><th>New File (PR)</th><th>Similar To</th><th>Score</th><th>Matches</th><th>Category</th><th>Language</th></tr></thead>
+        <tbody>${rows}</tbody>
+       </table>
+       ${detailBlocks}`
+  }
+</div>
+</body>
+</html>`;
+
+          fs.writeFileSync('/tmp/report.html', html);
+          console.log(`Done: ${findings.length} findings | critical=${critical.length} warning=${warning.length} info=${info.length}`);
+          JSEOF
+          node /tmp/analyzer.js
+        continue-on-error: true
+
+      - name: Write Job Summary
+        if: always()
+        run: |
+          if [ -f /tmp/findings.json ]; then
+            TOTAL=$(jq '.findings | length' /tmp/findings.json)
+            CRIT=$(jq '[.findings[] | select(.severity=="critical")] | length' /tmp/findings.json)
+            WARN=$(jq '[.findings[] | select(.severity=="warning")] | length' /tmp/findings.json)
+            INFO=$(jq '[.findings[] | select(.severity=="info")] | length' /tmp/findings.json)
+            CHANGED=$(jq '.total_changed' /tmp/findings.json)
+
+            if [ "$TOTAL" = "0" ]; then
+              echo "## ✅ No Code Duplication Detected" >> $GITHUB_STEP_SUMMARY
+              echo "**$CHANGED** file(s) analyzed — all clean." >> $GITHUB_STEP_SUMMARY
+            else
+              echo "## 🔍 Code Duplication Report — PR #${{ github.event.number || 0 }}" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
+              echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+              echo "| Total Findings | $TOTAL |" >> $GITHUB_STEP_SUMMARY
+              echo "| 🚨 Critical (≥90%) | $CRIT |" >> $GITHUB_STEP_SUMMARY
+              echo "| ⚠️ Warning (≥75%) | $WARN |" >> $GITHUB_STEP_SUMMARY
+              echo "| ℹ️ Info (≥60%) | $INFO |" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### Findings" >> $GITHUB_STEP_SUMMARY
+              echo "| Severity | New File | Similar To | Score | Matches |" >> $GITHUB_STEP_SUMMARY
+              echo "|----------|----------|-----------|-------|---------|" >> $GITHUB_STEP_SUMMARY
+              jq -r '.findings[] | "| \(.severity) | `\(.new_file_path)` | `\(.existing_file_path)` | **\(.similarity_score)%** | \((.matching_lines // []) | length) |"' /tmp/findings.json >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "## ⚠️ Analysis failed — no report generated" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload HTML Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: duplication-report-pr-${{ github.event.number || github.run_id }}
+          path: /tmp/report.html
+          if-no-files-found: ignore
+
+      - name: Comment on PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const prNumber = context.payload.pull_request.number;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            let findings = [], totalChanged = 0;
+            try {
+              const data = JSON.parse(fs.readFileSync('/tmp/findings.json', 'utf8'));
+              findings = data.findings || [];
+              totalChanged = data.total_changed || 0;
+            } catch (e) {}
+
+            const critical = findings.filter(f => f.severity === 'critical').length;
+            const warning = findings.filter(f => f.severity === 'warning').length;
+            const info = findings.filter(f => f.severity === 'info').length;
+            const icon = findings.length === 0 ? '✅' : critical > 0 ? '🚨' : '⚠️';
+
+            let body = `## ${icon} CSCD2 — Code Duplication Analysis\n\n`;
+            body += `**Branch:** \`${context.payload.pull_request.head.ref}\` → \`${context.payload.pull_request.base.ref}\`\n\n`;
+
+            if (findings.length === 0) {
+              body += `This pull request looks clean — no significant code duplication found.\n`;
+            } else {
+              body += `| Metric | Count |\n|--------|-------|\n`;
+              body += `| Total Findings | ${findings.length} |\n`;
+              body += `| 🚨 Critical (≥90%) | ${critical} |\n`;
+              body += `| ⚠️ Warning (≥75%) | ${warning} |\n`;
+              body += `| ℹ️ Info (≥60%) | ${info} |\n\n`;
+
+              const top = findings.slice(0, 5);
+              body += `<details>\n<summary>Top ${top.length} Finding(s)</summary>\n\n`;
+              body += `| | New File | Similar To | Score | Matches |\n|--|----------|-----------|-------|---------|\n`;
+              for (const f of top) {
+                const ico = f.severity === 'critical' ? '🚨' : f.severity === 'warning' ? '⚠️' : 'ℹ️';
+                body += `| ${ico} | \`${f.new_file_path}\` | \`${f.existing_file_path}\` | **${f.similarity_score}%** | ${(f.matching_lines || []).length} |\n`;
+              }
+              body += `\n</details>\n\n`;
+              body += `👉 **[View Full Report & HTML](${runUrl})** ← Actions tab → Job Summary / Artifacts\n`;
+            }
+
+            body += `\n---\n*Analyzed by CSCD2 · ${totalChanged} file(s) checked*`;
+
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
+              issue_number: prNumber,
             });
 
             const existing = comments.find(c => c.body?.includes('CSCD2 — Code Duplication Analysis'));
-
             if (existing) {
               await github.rest.issues.updateComment({
                 owner: context.repo.owner,
@@ -121,7 +475,7 @@ jobs:
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: context.payload.pull_request.number,
+                issue_number: prNumber,
                 body,
               });
             }
